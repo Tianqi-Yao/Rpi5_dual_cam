@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local capture/output directories (if generated inside the repo)
+code/captures/
+code/calibration_*/
+*.jpg
+*.png
+
+# OS
+.DS_Store

@@ -1,0 +1,11 @@
+# Python dependencies for the dual-camera 64MP toolset.
+#
+# picamera2 / libcamera / rpicam-apps are NOT installed via pip.
+# On Raspberry Pi OS install them via apt instead:
+#   sudo apt update
+#   sudo apt install -y python3-picamera2 rpicam-apps
+#
+# The packages below are installed via pip (or apt python3-* equivalents):
+opencv-python
+numpy
+matplotlib
