@@ -23,10 +23,14 @@ from dual_cam_common import (
 )
 
 # -- Config --
-PREVIEW_SIZE = (960, 720)
-INIT_LP      = 5.0
-ZOOM_MIN     = 1
-ZOOM_MAX     = 20
+PREVIEW_SIZE  = (960, 720)
+INIT_LP       = 5.0
+ZOOM_MIN      = 1
+ZOOM_MAX      = 20
+
+# Preview raw (sensor) mode cycle — all 4:3, no FOV crop. 'p' cycles through these.
+PREVIEW_MODES = ["mid", "half", "full"]
+PREVIEW_FPS   = {"mid": 30, "half": 7, "full": 2}
 
 OUTPUT_DIR = os.path.join(SAVE_DIR_BASE, "preview_captures")
 
@@ -56,6 +60,7 @@ class CamState:
         self.zoom_cx = 0.5
         self.zoom_cy = 0.5
         self.save_full = True  # True=64MP (full), False=16MP (half)
+        self.preview_mode = "mid"  # raw sensor mode for preview: mid/half/full
 
     def roi(self):
         if self.zoom <= 1:
@@ -95,21 +100,32 @@ class DualCam:
                 pass
             self._start_preview(cam, st)
 
-    def _preview_config(self, cam):
+    def _preview_config(self, cam, mode):
         return cam.create_preview_configuration(
             main={"size": PREVIEW_SIZE, "format": "BGR888"},
-            controls={"FrameRate": 30},
+            raw={"size": SENSOR_MODES[mode]},
+            controls={"FrameRate": PREVIEW_FPS[mode]},
             buffer_count=2,
         )
 
     def _start_preview(self, cam, st):
-        cfg = self._preview_config(cam)
+        cfg = self._preview_config(cam, st.preview_mode)
         cam.configure(cfg)
         cam.start()
         time.sleep(0.3)
         cam.set_controls({"AfMode": 0, "LensPosition": st.lp, "ExposureValue": st.ev})
         if st.zoom > 1:
             cam.set_controls({"ScalerCrop": st.scaler_crop()})
+
+    def cycle_preview_mode(self, idx):
+        """Cycle the preview's raw sensor mode (mid -> half -> full -> mid)."""
+        cam = self.cams[idx]
+        st = self.states[idx]
+        cur = PREVIEW_MODES.index(st.preview_mode)
+        st.preview_mode = PREVIEW_MODES[(cur + 1) % len(PREVIEW_MODES)]
+        cam.stop()
+        self._start_preview(cam, st)
+        return st.preview_mode
 
     def apply_controls(self, idx):
         st = self.states[idx]
@@ -272,14 +288,14 @@ def ev_bracket(dual, idx, backend):
 def add_overlay(frame, idx, st, fps, sharpness, active):
     h, w = frame.shape[:2]
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (w, 70), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 72), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
-    cv2.putText(frame, "CAM %d  %s" % (idx, st.save_res_tag().upper()),
-                (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(frame, "CAM %d  SAVE=%s  PRE=%s" % (idx, st.save_res_tag().upper(), st.preview_mode.upper()),
+                (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
     cv2.putText(frame, "LP=%.2f  EV=%+.1f  Zoom=%dx" % (st.lp, st.ev, st.zoom),
-                (8, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 120), 2)
+                (8, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 120), 2)
     cv2.putText(frame, "FPS=%.1f  Sharp=%.0f" % (fps, sharpness),
-                (8, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 120), 1)
+                (8, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 120), 2)
     if active:
         cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (0, 165, 255), 4)
     return frame
@@ -306,6 +322,7 @@ def print_controls():
     print("    n       EV bracket 5 shots (active camera)")
     print("    m       toggle save resolution FULL(64MP) <-> HALF(16MP)")
     print("  Mode")
+    print("    p       cycle preview raw mode: mid(4MP) -> half(16MP) -> full(64MP)")
     print("    v       toggle save backend: picamera2 <-> rpicam-still")
     print("  Other")
     print("    f       print state    h  help    q  quit")
@@ -434,6 +451,13 @@ def main():
                 st.save_full = not st.save_full
                 print("\n[RES] cam%d save: %s" % (active, "FULL 9248x6944" if st.save_full else "HALF 4624x3472"))
 
+            # -- Cycle preview raw mode
+            elif key in (ord('p'), ord('P')):
+                mode = dual.cycle_preview_mode(active)
+                w, h = SENSOR_MODES[mode]
+                print("\n[PREVIEW] cam%d raw mode -> %s (%dx%d, ~%dfps)" % (
+                    active, mode, w, h, PREVIEW_FPS[mode]))
+
             # -- Toggle save backend
             elif key in (ord('v'), ord('V')):
                 backend = "rpicam-still" if backend == "picamera2" else "picamera2"
@@ -461,10 +485,10 @@ def main():
             elif key in (ord('f'), ord('F')):
                 roi = st.roi()
                 print("\n[INFO] active=cam%d  LP=%.2f  EV=%+.1f  Zoom=%dx  "
-                      "ROI=(%.3f,%.3f,%.3f,%.3f)  save=%s  backend=%s" % (
+                      "ROI=(%.3f,%.3f,%.3f,%.3f)  save=%s  preview=%s  backend=%s" % (
                           active, st.lp, st.ev, st.zoom,
                           roi[0], roi[1], roi[2], roi[3],
-                          "FULL" if st.save_full else "HALF", backend))
+                          "FULL" if st.save_full else "HALF", st.preview_mode.upper(), backend))
 
     except KeyboardInterrupt:
         print("\n[INFO] Interrupted")
