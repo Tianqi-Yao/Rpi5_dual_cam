@@ -31,11 +31,11 @@ DISPLAY_H = 720
 # DISPLAY_H = 3472
 WIN_NAME  = "preview"
 
-# rpicam-still preview window position/size (still backend only)
-PREVIEW_X = 100
-PREVIEW_Y = 50
-PREVIEW_W = DISPLAY_W
-PREVIEW_H = DISPLAY_H
+# rpicam-still subprocess window geometry (still backend only, unrelated to capture resolution)
+RPICAM_WIN_X = 100
+RPICAM_WIN_Y = 50
+RPICAM_WIN_W = DISPLAY_W
+RPICAM_WIN_H = DISPLAY_H
 
 # ── Camera / focus ─────────────────────────────────────────────────────────
 INIT_LP     = 15.0
@@ -147,7 +147,6 @@ class PicaBackend:
         global LP_MAX
         self.cam = Picamera2(self.cam_idx)
         LP_MAX = _read_lp_max(self.cam)
-        self.capture_sz = (4624, 3472)
         cfg = self.cam.create_preview_configuration(
             main={"size": self.capture_sz, "format": "RGB888"},
         )
@@ -196,6 +195,11 @@ class PicaBackend:
     def alive(self):
         return self.cam is not None
 
+    def switch_capture_sz(self, new_sz, state):
+        self.stop()
+        self.capture_sz = new_sz
+        self.start(state)
+
 
 # ── StillBackend (rpicam-still subprocess) ─────────────────────────────────
 
@@ -213,7 +217,7 @@ class StillBackend:
             "-t", "0",
             "--camera", str(self.cam_idx),
             "--mode", "4624:3472:12:P",
-            "--preview", "%d,%d,%d,%d" % (PREVIEW_X, PREVIEW_Y, PREVIEW_W, PREVIEW_H),
+            "--preview", "%d,%d,%d,%d" % (RPICAM_WIN_X, RPICAM_WIN_Y, RPICAM_WIN_W, RPICAM_WIN_H),
             "--info-text", INFO_FMT,
             "--autofocus-mode", "manual",
             "--lens-position", "%.2f" % state.lp,
@@ -279,8 +283,8 @@ def make_status_bar(state, cam_idx, lp_max, capture_sz=(4624, 3472)):
            capture_sz[0], capture_sz[1], DISPLAY_W, DISPLAY_H,
            state.zoom_cx, state.zoom_cy)
     )
-    line2a = "=/- ] [ . , : LP    e/w : EV    z/x : zoom    i/k/j/l : pan    r : reset"
-    line2b = "t : AF    s : save single    b : burst    n : EV bracket    v : backend    m : res    q : quit"
+    line2a = "=/- ] [ . , : LP    e/w : EV    z : zoom out / x : zoom in    i/k/j/l : pan    r : reset"
+    line2b = "t : AF    s : save    b : burst    n : EV bracket    p : cap res    v : backend    m : save res    q : quit"
 
     cv2.putText(bar, line1a, (8, dy),     cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 0),       fw, cv2.LINE_AA)
     cv2.putText(bar, line1b, (8, dy * 2), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 220, 0),       fw, cv2.LINE_AA)
@@ -549,12 +553,12 @@ def main():
 
             # ── Zoom ───────────────────────────────────────────────────────
             elif k in (ord('z'), ord('Z')):
-                state.zoom = clamp(state.zoom + 1, ZOOM_MIN, ZOOM_MAX)
+                state.zoom = clamp(state.zoom - 1, ZOOM_MIN, ZOOM_MAX)
                 if state.backend == "qtgl": qbe.apply_zoom(state)
                 else: sbe.mark_dirty()
 
             elif k in (ord('x'), ord('X')):
-                state.zoom = clamp(state.zoom - 1, ZOOM_MIN, ZOOM_MAX)
+                state.zoom = clamp(state.zoom + 1, ZOOM_MIN, ZOOM_MAX)
                 if state.backend == "qtgl": qbe.apply_zoom(state)
                 else: sbe.mark_dirty()
 
@@ -602,6 +606,13 @@ def main():
                 else: sbe.mark_dirty()
 
             # ── Toggle backend ─────────────────────────────────────────────
+            elif k in (ord('p'), ord('P')):
+                if state.backend == "qtgl":
+                    new_sz = (9248, 6944) if qbe.capture_sz == (4624, 3472) else (4624, 3472)
+                    print("[CAP] Switching preview capture to %dx%d (may be slow)..." % new_sz)
+                    qbe.switch_capture_sz(new_sz, state)
+                    print("[CAP] Done.")
+
             elif k in (ord('v'), ord('V')):
                 if state.backend == "qtgl":
                     print("[MODE] Switching to rpicam-still preview...")
