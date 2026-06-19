@@ -51,6 +51,8 @@ SENSOR_H = 6944
 DEBOUNCE_S    = 0.25
 RESTART_DELAY = 0.15
 
+PICAM_SETTLE_S   = 2.0    # Picamera2 still AE 收敛等待时间（秒）
+
 FULL_MODE = "9248:6944:12:P"
 HALF_MODE = "4624:3472:12:P"
 
@@ -287,22 +289,6 @@ def make_status_bar(state, cam_idx, lp_max, capture_sz=(4624, 3472)):
 
 # ── Save helpers ───────────────────────────────────────────────────────────
 
-def _read_ae(qbe):
-    if qbe.cam is None:
-        return None, None
-    try:
-        meta = qbe.cam.capture_metadata()
-        return meta.get("ExposureTime"), meta.get("AnalogueGain")
-    except Exception:
-        return None, None
-
-
-def _ae_flags(exp_us, gain):
-    if exp_us and gain:
-        return " --shutter %d --gain %.3f" % (int(exp_us), float(gain))
-    return ""
-
-
 def _stop_for_save(state, qbe, sbe):
     if state.backend == "qtgl":
         qbe.stop()
@@ -318,19 +304,18 @@ def _restore_after_save(state, qbe, sbe):
         sbe.start(state)
 
 
-def _rpicam_run(qbe, state, mode_str, out_path, ae="", extra=""):
-    """Run rpicam-still and return exit code."""
+def _rpicam_run(qbe, state, mode_str, out_path, extra=""):
+    """Run rpicam-still. No -t → uses default 5000ms for AE convergence before capture."""
     cmd = (
-        "rpicam-still -n --immediate --camera %d --mode %s "
-        "--autofocus-mode manual --lens-position %.2f --ev %.1f%s%s -o %s"
-        % (qbe.cam_idx, mode_str, state.lp, state.ev, ae, extra, out_path)
+        'rpicam-still -n --camera %d --mode %s '
+        '--autofocus-mode manual --lens-position %.2f --ev %.1f%s -o "%s"'
+        % (qbe.cam_idx, mode_str, state.lp, state.ev, extra, out_path)
     )
     return os.system(cmd)
 
 
-def _picamera_still_capture(qbe, state, exp_us=None, gain=None):
-    """Open Picamera2 in still config, capture one frame, return numpy array.
-    exp_us/gain: lock AE from preview to avoid re-exposure on fresh camera open."""
+def _picamera_still_capture(qbe, state):
+    """Open Picamera2 in still config, capture one frame with own AE convergence."""
     size = (9248, 6944) if state.save_full else (4624, 3472)
     cam = Picamera2(qbe.cam_idx)
     try:
@@ -338,12 +323,8 @@ def _picamera_still_capture(qbe, state, exp_us=None, gain=None):
             main={"size": size, "format": "RGB888"}, buffer_count=1)
         cam.configure(cfg)
         cam.start()
-        controls = {"AfMode": 0, "LensPosition": state.lp, "ExposureValue": state.ev}
-        if exp_us and gain:
-            controls["ExposureTime"] = int(exp_us)
-            controls["AnalogueGain"] = float(gain)
-        cam.set_controls(controls)
-        time.sleep(0.5)
+        cam.set_controls({"AfMode": 0, "LensPosition": state.lp, "ExposureValue": state.ev})
+        time.sleep(PICAM_SETTLE_S)
         frame = cam.capture_array()
         return frame
     finally:
@@ -353,9 +334,8 @@ def _picamera_still_capture(qbe, state, exp_us=None, gain=None):
         except Exception: pass
 
 
-def _picamera_dng_capture(qbe, state, out_path, exp_us=None, gain=None):
-    """Open Picamera2 with raw + main stream, save DNG file.
-    main stream is required by Picamera2 for DNG output alongside raw."""
+def _picamera_dng_capture(qbe, state, out_path):
+    """Open Picamera2 with raw + main stream, save DNG via request.save_dng()."""
     size = (9248, 6944) if state.save_full else (4624, 3472)
     cam = Picamera2(qbe.cam_idx)
     try:
@@ -365,13 +345,13 @@ def _picamera_dng_capture(qbe, state, out_path, exp_us=None, gain=None):
             buffer_count=1)
         cam.configure(cfg)
         cam.start()
-        controls = {"AfMode": 0, "LensPosition": state.lp, "ExposureValue": state.ev}
-        if exp_us and gain:
-            controls["ExposureTime"] = int(exp_us)
-            controls["AnalogueGain"] = float(gain)
-        cam.set_controls(controls)
-        time.sleep(0.5)
-        cam.capture_file(out_path)
+        cam.set_controls({"AfMode": 0, "LensPosition": state.lp, "ExposureValue": state.ev})
+        time.sleep(PICAM_SETTLE_S)
+        request = cam.capture_request()
+        try:
+            request.save_dng(out_path)
+        finally:
+            request.release()
     finally:
         try: cam.stop()
         except Exception: pass
@@ -386,87 +366,79 @@ def _fname(base_ts, tag, ext, state, qbe):
 
 # ── 6 save routes ──────────────────────────────────────────────────────────
 
-def save_r1(state, qbe, sbe, output_dir, base_ts=None, ae=""):
+def save_r1(state, qbe, sbe, output_dir, base_ts=None):
     """z — rpicam-still → JPEG"""
     t = base_ts or ts()
-    path = os.path.join(output_dir, _fname(t, "rpi_jpg", "jpg", state, qbe))
+    path = os.path.join(output_dir, _fname(t, "z_r1_rpicam_jpg", "jpg", state, qbe))
     print("[R1] rpi JPEG -> %s" % path)
-    ret = _rpicam_run(qbe, state, state.save_mode_cmd(), path, ae)
+    ret = _rpicam_run(qbe, state, state.save_mode_cmd(), path)
     print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
 
 
-def save_r2(state, qbe, sbe, output_dir, base_ts=None, ae=""):
+def save_r2(state, qbe, sbe, output_dir, base_ts=None):
     """x — rpicam-still → PNG"""
     t = base_ts or ts()
-    path = os.path.join(output_dir, _fname(t, "rpi_png", "png", state, qbe))
+    path = os.path.join(output_dir, _fname(t, "x_r2_rpicam_png", "png", state, qbe))
     print("[R2] rpi PNG  -> %s" % path)
-    ret = _rpicam_run(qbe, state, state.save_mode_cmd(), path, ae, " --encoding png")
+    ret = _rpicam_run(qbe, state, state.save_mode_cmd(), path, " --encoding png")
     print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
 
 
-def save_r3(state, qbe, sbe, output_dir, base_ts=None, ae=""):
+def save_r3(state, qbe, sbe, output_dir, base_ts=None):
     """c — rpicam-still → DNG + JPEG"""
     t = base_ts or ts()
-    # rpicam-still saves .jpg + .dng with same base name
-    path = os.path.join(output_dir, _fname(t, "rpi_dng", "jpg", state, qbe))
+    path = os.path.join(output_dir, _fname(t, "c_r3_rpicam_dng", "jpg", state, qbe))
     print("[R3] rpi DNG  -> %s + .dng" % path)
-    ret = _rpicam_run(qbe, state, state.save_mode_cmd(), path, ae, " --raw")
+    ret = _rpicam_run(qbe, state, state.save_mode_cmd(), path, " --raw")
     print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
 
 
-def save_r4(state, qbe, sbe, output_dir, base_ts=None, frame=None, exp_us=None, gain=None):
+def save_r4(state, qbe, sbe, output_dir, base_ts=None, frame=None):
     """v — Picamera2 → JPEG"""
     t = base_ts or ts()
-    path = os.path.join(output_dir, _fname(t, "pic_jpg", "jpg", state, qbe))
-    f = frame if frame is not None else _picamera_still_capture(qbe, state, exp_us, gain)
+    path = os.path.join(output_dir, _fname(t, "v_r4_picam_jpg", "jpg", state, qbe))
+    f = frame if frame is not None else _picamera_still_capture(qbe, state)
     print("[R4] pic JPEG -> %s" % path)
     cv2.imwrite(path, f, [cv2.IMWRITE_JPEG_QUALITY, 95])
     print("     OK")
 
 
-def save_r5(state, qbe, sbe, output_dir, base_ts=None, frame=None, exp_us=None, gain=None):
+def save_r5(state, qbe, sbe, output_dir, base_ts=None, frame=None):
     """b — Picamera2 → PNG"""
     t = base_ts or ts()
-    path = os.path.join(output_dir, _fname(t, "pic_png", "png", state, qbe))
-    f = frame if frame is not None else _picamera_still_capture(qbe, state, exp_us, gain)
+    path = os.path.join(output_dir, _fname(t, "b_r5_picam_png", "png", state, qbe))
+    f = frame if frame is not None else _picamera_still_capture(qbe, state)
     print("[R5] pic PNG  -> %s" % path)
     cv2.imwrite(path, f)
     print("     OK")
 
 
-def save_r6(state, qbe, sbe, output_dir, base_ts=None, exp_us=None, gain=None):
+def save_r6(state, qbe, sbe, output_dir, base_ts=None):
     """n — Picamera2 → DNG"""
     t = base_ts or ts()
-    path = os.path.join(output_dir, _fname(t, "pic_dng", "dng", state, qbe))
+    path = os.path.join(output_dir, _fname(t, "n_r6_picam_dng", "dng", state, qbe))
     print("[R6] pic DNG  -> %s" % path)
-    _picamera_dng_capture(qbe, state, path, exp_us, gain)
+    _picamera_dng_capture(qbe, state, path)
     print("     OK")
 
 
 def save_all(state, qbe, sbe, output_dir):
-    """m — all 6 routes with shared timestamp and minimal stop/start cycles"""
+    """m — all 6 routes, each with own AE convergence"""
     os.makedirs(output_dir, exist_ok=True)
-    exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
-    ae = _ae_flags(exp_us, gain)
-    t  = ts()
+    t = ts()
     print("[ALL] Starting all 6 routes  ts=%s" % t)
 
     _stop_for_save(state, qbe, sbe)
-
-    # R1 R2 R3 — rpicam-still (subprocesses, AE locked via --shutter --gain)
-    save_r1(state, qbe, sbe, output_dir, t, ae)
-    save_r2(state, qbe, sbe, output_dir, t, ae)
-    save_r3(state, qbe, sbe, output_dir, t, ae)
-
-    # R4 R5 — Picamera2 JPEG + PNG, share one still capture, AE locked
-    frame = _picamera_still_capture(qbe, state, exp_us, gain)
-    save_r4(state, qbe, sbe, output_dir, t, frame=frame)
-    save_r5(state, qbe, sbe, output_dir, t, frame=frame)
-
-    # R6 — Picamera2 DNG, AE locked
-    save_r6(state, qbe, sbe, output_dir, t, exp_us=exp_us, gain=gain)
-
-    _restore_after_save(state, qbe, sbe)
+    try:
+        save_r1(state, qbe, sbe, output_dir, t)
+        save_r2(state, qbe, sbe, output_dir, t)
+        save_r3(state, qbe, sbe, output_dir, t)
+        frame = _picamera_still_capture(qbe, state)
+        save_r4(state, qbe, sbe, output_dir, t, frame=frame)
+        save_r5(state, qbe, sbe, output_dir, t, frame=frame)
+        save_r6(state, qbe, sbe, output_dir, t)
+    finally:
+        _restore_after_save(state, qbe, sbe)
     print("[ALL] Done.")
 
 
@@ -474,26 +446,27 @@ def save_all(state, qbe, sbe, output_dir):
 
 def save_burst(state, qbe, sbe, output_dir, count=5):
     os.makedirs(output_dir, exist_ok=True)
-    ae = _ae_flags(*_read_ae(qbe)) if state.backend == "qtgl" else ""
     step    = 0.25
     half    = count // 2
     offsets = [round(-half * step + i * step, 2) for i in range(count)]
     lps     = [round(clamp(state.lp + d, LP_MIN, LP_MAX), 2) for d in offsets]
     print("[BURST] %d shots, LP: %s" % (count, lps))
     _stop_for_save(state, qbe, sbe)
-    for lp in lps:
-        fname = "%s_%s_lp%.2f_ev%.1f_cam%d.jpg" % (
-            ts(), state.save_res_tag(), lp, state.ev, qbe.cam_idx)
-        path = os.path.join(output_dir, fname)
-        cmd = (
-            "rpicam-still -n --immediate --camera %d --mode %s "
-            "--autofocus-mode manual --lens-position %.2f --ev %.1f%s -o %s"
-            % (qbe.cam_idx, state.save_mode_cmd(), lp, state.ev, ae, path)
-        )
-        ret = os.system(cmd)
-        print("  LP=%.2f -> %s" % (lp, "OK" if ret == 0 else "Error"))
-        time.sleep(0.3)
-    _restore_after_save(state, qbe, sbe)
+    try:
+        for lp in lps:
+            fname = "%s_%s_lp%.2f_ev%.1f_cam%d.jpg" % (
+                ts(), state.save_res_tag(), lp, state.ev, qbe.cam_idx)
+            path = os.path.join(output_dir, fname)
+            cmd = (
+                'rpicam-still -n --camera %d --mode %s '
+                '--autofocus-mode manual --lens-position %.2f --ev %.1f -o "%s"'
+                % (qbe.cam_idx, state.save_mode_cmd(), lp, state.ev, path)
+            )
+            ret = os.system(cmd)
+            print("  LP=%.2f -> %s" % (lp, "OK" if ret == 0 else "Error"))
+            time.sleep(0.3)
+    finally:
+        _restore_after_save(state, qbe, sbe)
     print("[BURST] Done.")
 
 
@@ -504,19 +477,21 @@ def ev_bracket(state, qbe, sbe, output_dir):
     base_ts = ts()
     print("[EV-BRACKET] LP=%.2f, EV values: %s" % (state.lp, evs))
     _stop_for_save(state, qbe, sbe)
-    for i, ev in enumerate(evs):
-        fname = "%s_%s_lp%.2f_ev%.1f_brk%d_cam%d.jpg" % (
-            base_ts, state.save_res_tag(), state.lp, ev, i, qbe.cam_idx)
-        path = os.path.join(output_dir, fname)
-        cmd = (
-            "rpicam-still -n --immediate --camera %d --mode %s "
-            "--autofocus-mode manual --lens-position %.2f --ev %.1f -o %s"
-            % (qbe.cam_idx, state.save_mode_cmd(), state.lp, ev, path)
-        )
-        ret = os.system(cmd)
-        print("  EV=%+.1f -> %s" % (ev, "OK" if ret == 0 else "Error"))
-        time.sleep(0.3)
-    _restore_after_save(state, qbe, sbe)
+    try:
+        for i, ev in enumerate(evs):
+            fname = "%s_%s_lp%.2f_ev%.1f_brk%d_cam%d.jpg" % (
+                base_ts, state.save_res_tag(), state.lp, ev, i, qbe.cam_idx)
+            path = os.path.join(output_dir, fname)
+            cmd = (
+                'rpicam-still -n --immediate --camera %d --mode %s '
+                '--autofocus-mode manual --lens-position %.2f --ev %.1f -o "%s"'
+                % (qbe.cam_idx, state.save_mode_cmd(), state.lp, ev, path)
+            )
+            ret = os.system(cmd)
+            print("  EV=%+.1f -> %s" % (ev, "OK" if ret == 0 else "Error"))
+            time.sleep(0.3)
+    finally:
+        _restore_after_save(state, qbe, sbe)
     print("[EV-BRACKET] Done.")
 
 
@@ -755,47 +730,53 @@ def main():
             # ── 6 save routes (z x c v b n) ───────────────────────────────
             elif k in (ord('z'), ord('Z')):
                 os.makedirs(output_dir, exist_ok=True)
-                ae = _ae_flags(*_read_ae(qbe)) if state.backend == "qtgl" else ""
                 _stop_for_save(state, qbe, sbe)
-                save_r1(state, qbe, sbe, output_dir, ae=ae)
-                _restore_after_save(state, qbe, sbe)
+                try:
+                    save_r1(state, qbe, sbe, output_dir)
+                finally:
+                    _restore_after_save(state, qbe, sbe)
 
             elif k in (ord('x'), ord('X')):
                 os.makedirs(output_dir, exist_ok=True)
-                ae = _ae_flags(*_read_ae(qbe)) if state.backend == "qtgl" else ""
                 _stop_for_save(state, qbe, sbe)
-                save_r2(state, qbe, sbe, output_dir, ae=ae)
-                _restore_after_save(state, qbe, sbe)
+                try:
+                    save_r2(state, qbe, sbe, output_dir)
+                finally:
+                    _restore_after_save(state, qbe, sbe)
 
             elif k in (ord('c'), ord('C')):
                 os.makedirs(output_dir, exist_ok=True)
-                ae = _ae_flags(*_read_ae(qbe)) if state.backend == "qtgl" else ""
                 _stop_for_save(state, qbe, sbe)
-                save_r3(state, qbe, sbe, output_dir, ae=ae)
-                _restore_after_save(state, qbe, sbe)
+                try:
+                    save_r3(state, qbe, sbe, output_dir)
+                finally:
+                    _restore_after_save(state, qbe, sbe)
 
             elif k in (ord('v'), ord('V')):
                 os.makedirs(output_dir, exist_ok=True)
-                exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
                 _stop_for_save(state, qbe, sbe)
-                frame = _picamera_still_capture(qbe, state, exp_us, gain)
-                save_r4(state, qbe, sbe, output_dir, frame=frame)
-                _restore_after_save(state, qbe, sbe)
+                try:
+                    frame = _picamera_still_capture(qbe, state)
+                    save_r4(state, qbe, sbe, output_dir, frame=frame)
+                finally:
+                    _restore_after_save(state, qbe, sbe)
 
             elif k in (ord('b'), ord('B')):
                 os.makedirs(output_dir, exist_ok=True)
-                exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
                 _stop_for_save(state, qbe, sbe)
-                frame = _picamera_still_capture(qbe, state, exp_us, gain)
-                save_r5(state, qbe, sbe, output_dir, frame=frame)
-                _restore_after_save(state, qbe, sbe)
+                try:
+                    frame = _picamera_still_capture(qbe, state)
+                    save_r5(state, qbe, sbe, output_dir, frame=frame)
+                finally:
+                    _restore_after_save(state, qbe, sbe)
 
             elif k in (ord('n'), ord('N')):
                 os.makedirs(output_dir, exist_ok=True)
-                exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
                 _stop_for_save(state, qbe, sbe)
-                save_r6(state, qbe, sbe, output_dir, exp_us=exp_us, gain=gain)
-                _restore_after_save(state, qbe, sbe)
+                try:
+                    save_r6(state, qbe, sbe, output_dir)
+                finally:
+                    _restore_after_save(state, qbe, sbe)
 
             # ── All routes (m) ─────────────────────────────────────────────
             elif k in (ord('m'), ord('M')):
