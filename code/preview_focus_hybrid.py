@@ -51,7 +51,7 @@ SENSOR_H = 6944
 DEBOUNCE_S    = 0.25
 RESTART_DELAY = 0.15
 
-PICAM_SETTLE_S   = 2.0    # Picamera2 still AE 收敛等待时间（秒）
+PICAM_SETTLE_S   = 5.0    # Picamera2 still AE 收敛等待时间（秒），与 rpicam-still 默认 5s 一致
 
 FULL_MODE = "9248:6944:12:P"
 HALF_MODE = "4624:3472:12:P"
@@ -129,9 +129,6 @@ class State:
 
     def save_mode_cmd(self):
         return FULL_MODE if self.save_full else HALF_MODE
-
-    def save_res_tag(self):
-        return "64mp" if self.save_full else "half"
 
 
 # ── PicaBackend (Picamera2 + OpenCV) ──────────────────────────────────────
@@ -366,7 +363,7 @@ def _fname(base_ts, tag, ext, state, qbe):
 
 # ── 6 save routes ──────────────────────────────────────────────────────────
 
-def save_r1(state, qbe, sbe, output_dir, base_ts=None):
+def save_r1(state, qbe, output_dir, base_ts=None):
     """z — rpicam-still → JPEG"""
     t = base_ts or ts()
     path = os.path.join(output_dir, _fname(t, "z_r1_rpicam_jpg", "jpg", state, qbe))
@@ -375,7 +372,7 @@ def save_r1(state, qbe, sbe, output_dir, base_ts=None):
     print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
 
 
-def save_r2(state, qbe, sbe, output_dir, base_ts=None):
+def save_r2(state, qbe, output_dir, base_ts=None):
     """x — rpicam-still → PNG"""
     t = base_ts or ts()
     path = os.path.join(output_dir, _fname(t, "x_r2_rpicam_png", "png", state, qbe))
@@ -384,7 +381,7 @@ def save_r2(state, qbe, sbe, output_dir, base_ts=None):
     print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
 
 
-def save_r3(state, qbe, sbe, output_dir, base_ts=None):
+def save_r3(state, qbe, output_dir, base_ts=None):
     """c — rpicam-still → DNG + JPEG"""
     t = base_ts or ts()
     path = os.path.join(output_dir, _fname(t, "c_r3_rpicam_dng", "jpg", state, qbe))
@@ -393,7 +390,7 @@ def save_r3(state, qbe, sbe, output_dir, base_ts=None):
     print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
 
 
-def save_r4(state, qbe, sbe, output_dir, base_ts=None, frame=None):
+def save_r4(state, qbe, output_dir, base_ts=None, frame=None):
     """v — Picamera2 → JPEG"""
     t = base_ts or ts()
     path = os.path.join(output_dir, _fname(t, "v_r4_picam_jpg", "jpg", state, qbe))
@@ -403,7 +400,7 @@ def save_r4(state, qbe, sbe, output_dir, base_ts=None, frame=None):
     print("     OK")
 
 
-def save_r5(state, qbe, sbe, output_dir, base_ts=None, frame=None):
+def save_r5(state, qbe, output_dir, base_ts=None, frame=None):
     """b — Picamera2 → PNG"""
     t = base_ts or ts()
     path = os.path.join(output_dir, _fname(t, "b_r5_picam_png", "png", state, qbe))
@@ -413,7 +410,7 @@ def save_r5(state, qbe, sbe, output_dir, base_ts=None, frame=None):
     print("     OK")
 
 
-def save_r6(state, qbe, sbe, output_dir, base_ts=None):
+def save_r6(state, qbe, output_dir, base_ts=None):
     """n — Picamera2 → DNG"""
     t = base_ts or ts()
     path = os.path.join(output_dir, _fname(t, "n_r6_picam_dng", "dng", state, qbe))
@@ -430,19 +427,19 @@ def save_all(state, qbe, sbe, output_dir):
 
     _stop_for_save(state, qbe, sbe)
     try:
-        save_r1(state, qbe, sbe, output_dir, t)
-        save_r2(state, qbe, sbe, output_dir, t)
-        save_r3(state, qbe, sbe, output_dir, t)
+        save_r1(state, qbe, output_dir, t)
+        save_r2(state, qbe, output_dir, t)
+        save_r3(state, qbe, output_dir, t)
         frame = _picamera_still_capture(qbe, state)
-        save_r4(state, qbe, sbe, output_dir, t, frame=frame)
-        save_r5(state, qbe, sbe, output_dir, t, frame=frame)
-        save_r6(state, qbe, sbe, output_dir, t)
+        save_r4(state, qbe, output_dir, t, frame=frame)
+        save_r5(state, qbe, output_dir, t, frame=frame)
+        save_r6(state, qbe, output_dir, t)
     finally:
         _restore_after_save(state, qbe, sbe)
     print("[ALL] Done.")
 
 
-# ── Burst / EV bracket (rpicam-still JPEG, moved to u/y) ───────────────────
+# ── Burst / EV bracket (Picamera2 PNG) ────────────────────────────────────
 
 def save_burst(state, qbe, sbe, output_dir, count=5):
     """Picamera2 LP sweep: AE converges once, then LP changes per shot (fast)."""
@@ -508,11 +505,12 @@ def ev_bracket(state, qbe, sbe, output_dir):
                 "LensPosition": state.lp,
                 "ExposureValue": evs[0],
             })
-            time.sleep(PICAM_SETTLE_S)   # 初始 AE 收敛
+            time.sleep(PICAM_SETTLE_S)   # 初始 AE 收敛（已在 evs[0] 上）
             base_ts = ts()
             for i, ev in enumerate(evs):
-                cam.set_controls({"ExposureValue": ev})
-                time.sleep(1.5)          # 等 AE 调整到新 EV 目标
+                if i > 0:   # 第一张直接拍（已收敛），后续换 EV 后再等
+                    cam.set_controls({"ExposureValue": ev})
+                    time.sleep(1.5)
                 frame = cam.capture_array()
                 fname = "%s_bracket_lp%.2f_ev%.1f_brk%d_cam%d.png" % (
                     base_ts, state.lp, ev, i, qbe.cam_idx)
@@ -765,7 +763,7 @@ def main():
                 os.makedirs(output_dir, exist_ok=True)
                 _stop_for_save(state, qbe, sbe)
                 try:
-                    save_r1(state, qbe, sbe, output_dir)
+                    save_r1(state, qbe, output_dir)
                 finally:
                     _restore_after_save(state, qbe, sbe)
 
@@ -773,7 +771,7 @@ def main():
                 os.makedirs(output_dir, exist_ok=True)
                 _stop_for_save(state, qbe, sbe)
                 try:
-                    save_r2(state, qbe, sbe, output_dir)
+                    save_r2(state, qbe, output_dir)
                 finally:
                     _restore_after_save(state, qbe, sbe)
 
@@ -781,7 +779,7 @@ def main():
                 os.makedirs(output_dir, exist_ok=True)
                 _stop_for_save(state, qbe, sbe)
                 try:
-                    save_r3(state, qbe, sbe, output_dir)
+                    save_r3(state, qbe, output_dir)
                 finally:
                     _restore_after_save(state, qbe, sbe)
 
@@ -790,7 +788,7 @@ def main():
                 _stop_for_save(state, qbe, sbe)
                 try:
                     frame = _picamera_still_capture(qbe, state)
-                    save_r4(state, qbe, sbe, output_dir, frame=frame)
+                    save_r4(state, qbe, output_dir, frame=frame)
                 finally:
                     _restore_after_save(state, qbe, sbe)
 
@@ -799,7 +797,7 @@ def main():
                 _stop_for_save(state, qbe, sbe)
                 try:
                     frame = _picamera_still_capture(qbe, state)
-                    save_r5(state, qbe, sbe, output_dir, frame=frame)
+                    save_r5(state, qbe, output_dir, frame=frame)
                 finally:
                     _restore_after_save(state, qbe, sbe)
 
@@ -807,7 +805,7 @@ def main():
                 os.makedirs(output_dir, exist_ok=True)
                 _stop_for_save(state, qbe, sbe)
                 try:
-                    save_r6(state, qbe, sbe, output_dir)
+                    save_r6(state, qbe, output_dir)
                 finally:
                     _restore_after_save(state, qbe, sbe)
 
