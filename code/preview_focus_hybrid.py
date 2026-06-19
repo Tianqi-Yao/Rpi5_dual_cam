@@ -3,8 +3,7 @@
 # Adapted from ../64mp/cam_test/preview_focus_hybrid.py
 #
 # Default: Picamera2 OpenCV preview (status bar above image, instant LP/EV).
-# Press V to switch to rpicam-still preview (own window; OpenCV window shows status only).
-# All captures use rpicam-still subprocess.
+# Press H to switch to rpicam-still preview (own window; OpenCV window shows status only).
 #
 # LensPosition: 0.0 = infinity, higher = closer (~9-10cm at max)
 #
@@ -12,7 +11,6 @@
 #        Edit CAM_IDX below to select camera.
 
 import os
-import sys
 import time
 import subprocess
 from datetime import datetime
@@ -31,7 +29,7 @@ DISPLAY_H = 720
 # DISPLAY_H = 3472
 WIN_NAME  = "preview"
 
-# rpicam-still subprocess window geometry (still backend only, unrelated to capture resolution)
+# rpicam-still subprocess window geometry (still backend only)
 RPICAM_WIN_X = 100
 RPICAM_WIN_Y = 50
 RPICAM_WIN_W = DISPLAY_W
@@ -76,7 +74,6 @@ ROI_PRESETS = {
     ord('9'): (0.25, 0.75, 0.25, 0.25),
     ord('0'): (0.75, 0.75, 0.25, 0.25),
 }
-
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -141,7 +138,7 @@ class PicaBackend:
     def __init__(self, cam_idx):
         self.cam_idx    = cam_idx
         self.cam        = None
-        self.capture_sz = (4624, 3472)   # updated in start()
+        self.capture_sz = (4624, 3472)
 
     def start(self, state):
         global LP_MAX
@@ -163,14 +160,10 @@ class PicaBackend:
 
     def stop(self):
         if self.cam is not None:
-            try:
-                self.cam.stop()
-            except Exception:
-                pass
-            try:
-                self.cam.close()
-            except Exception:
-                pass
+            try: self.cam.stop()
+            except Exception: pass
+            try: self.cam.close()
+            except Exception: pass
             self.cam = None
         time.sleep(0.3)
 
@@ -189,8 +182,12 @@ class PicaBackend:
     def grab_frame(self):
         if self.cam is None:
             return None
-        frame = self.cam.capture_array()
-        return cv2.resize(frame, (DISPLAY_W, DISPLAY_H))
+        try:
+            frame = self.cam.capture_array()
+            return cv2.resize(frame, (DISPLAY_W, DISPLAY_H))
+        except Exception as e:
+            print("[WARN] grab_frame error: %s" % e)
+            return None
 
     def alive(self):
         return self.cam is not None
@@ -213,8 +210,7 @@ class StillBackend:
     def _cmd(self, state):
         x, y, w, h = state.roi()
         return [
-            "rpicam-still",
-            "-t", "0",
+            "rpicam-still", "-t", "0",
             "--camera", str(self.cam_idx),
             "--mode", "4624:3472:12:P",
             "--preview", "%d,%d,%d,%d" % (RPICAM_WIN_X, RPICAM_WIN_Y, RPICAM_WIN_W, RPICAM_WIN_H),
@@ -228,19 +224,14 @@ class StillBackend:
 
     def start(self, state):
         self.proc = subprocess.Popen(
-            self._cmd(state),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+            self._cmd(state), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
-            try:
-                self.proc.wait(timeout=3)
+            try: self.proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait()
+                self.proc.kill(); self.proc.wait()
         self.proc = None
 
     def restart(self, state):
@@ -270,12 +261,11 @@ def make_status_bar(state, cam_idx, lp_max, capture_sz=(4624, 3472)):
     bar = np.zeros((STATUS_H, DISPLAY_W, 3), dtype=np.uint8)
     fs = 0.65
     fw = 2
-    dy = 34   # line spacing
+    dy = 34
 
     line1a = (
         "cam%d  [%s]  LP=%.2f / max=%.2f  EV=%+.1f  Zoom=%dx"
-        % (cam_idx, state.backend.upper(), state.lp, lp_max,
-           state.ev, state.zoom)
+        % (cam_idx, state.backend.upper(), state.lp, lp_max, state.ev, state.zoom)
     )
     line1b = (
         "Save=%s  Preview=%dx%d-->%dx%d  Center=(%.2f, %.2f)"
@@ -283,20 +273,21 @@ def make_status_bar(state, cam_idx, lp_max, capture_sz=(4624, 3472)):
            capture_sz[0], capture_sz[1], DISPLAY_W, DISPLAY_H,
            state.zoom_cx, state.zoom_cy)
     )
-    line2a = "=/- ] [ . , : LP    e/w : EV    z : zoom out / x : zoom in    i/k/j/l : pan    r : reset"
-    line2b = "t : AF    s : save    b : burst    n : EV bracket    p : cap res    v : backend    m : save res    q : quit"
+    line2a = ("=/- ] [ . , : LP    e/w : EV    a/d : zoom    i/k/j/l : pan    r : reset    "
+              "p : cap res    g : save res    h : backend    t : AF    f : info    q : quit")
+    line2b = ("SAVE: z=rpi JPEG  x=rpi PNG  c=rpi DNG  v=pic JPEG  b=pic PNG  n=pic DNG  "
+              "m=ALL    u : burst    y : EV bracket")
 
-    cv2.putText(bar, line1a, (8, dy),     cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 0),       fw, cv2.LINE_AA)
-    cv2.putText(bar, line1b, (8, dy * 2), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 220, 0),       fw, cv2.LINE_AA)
-    cv2.putText(bar, line2a, (8, dy * 3), cv2.FONT_HERSHEY_SIMPLEX, fs, (160, 160, 160),   fw, cv2.LINE_AA)
-    cv2.putText(bar, line2b, (8, dy * 4), cv2.FONT_HERSHEY_SIMPLEX, fs, (160, 160, 160),   fw, cv2.LINE_AA)
+    cv2.putText(bar, line1a, (8, dy),     cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 0),     fw, cv2.LINE_AA)
+    cv2.putText(bar, line1b, (8, dy * 2), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 220, 0),     fw, cv2.LINE_AA)
+    cv2.putText(bar, line2a, (8, dy * 3), cv2.FONT_HERSHEY_SIMPLEX, fs, (160, 160, 160), fw, cv2.LINE_AA)
+    cv2.putText(bar, line2b, (8, dy * 4), cv2.FONT_HERSHEY_SIMPLEX, fs, (100, 200, 255), fw, cv2.LINE_AA)
     return bar
 
 
 # ── Save helpers ───────────────────────────────────────────────────────────
 
 def _read_ae(qbe):
-    """Read converged shutter/gain from Picamera2 before stopping, to lock AE in rpicam-still."""
     if qbe.cam is None:
         return None, None
     try:
@@ -307,7 +298,6 @@ def _read_ae(qbe):
 
 
 def _ae_flags(exp_us, gain):
-    """Return extra rpicam-still flags to lock exposure, or empty string if unavailable."""
     if exp_us and gain:
         return " --shutter %d --gain %.3f" % (int(exp_us), float(gain))
     return ""
@@ -328,40 +318,168 @@ def _restore_after_save(state, qbe, sbe):
         sbe.start(state)
 
 
-def save_single(state, qbe, sbe, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
-    fname = "%s_%s_lp%.2f_ev%.1f_cam%d.jpg" % (
-        ts(), state.save_res_tag(), state.lp, state.ev, qbe.cam_idx)
-    path = os.path.join(output_dir, fname)
-    _stop_for_save(state, qbe, sbe)
+def _rpicam_run(qbe, state, mode_str, out_path, ae="", extra=""):
+    """Run rpicam-still and return exit code."""
     cmd = (
         "rpicam-still -n --immediate --camera %d --mode %s "
-        "--autofocus-mode manual --lens-position %.2f --ev %.1f%s -o %s"
-        % (qbe.cam_idx, state.save_mode_cmd(), state.lp, state.ev,
-           _ae_flags(exp_us, gain), path)
+        "--autofocus-mode manual --lens-position %.2f --ev %.1f%s%s -o %s"
+        % (qbe.cam_idx, mode_str, state.lp, state.ev, ae, extra, out_path)
     )
-    print("[SAVE] %s  LP=%.2f  EV=%.1f  shutter=%s gain=%s ..." % (
-        "9248x6944" if state.save_full else "4624x3472", state.lp, state.ev,
-        ("%dus" % exp_us) if exp_us else "auto",
-        ("%.2f" % gain) if gain else "auto"))
-    ret = os.system(cmd)
-    time.sleep(0.15)
-    _restore_after_save(state, qbe, sbe)
-    print("[SAVE] %s" % (path if ret == 0 else ("Error (exit %d)" % ret)))
+    return os.system(cmd)
 
+
+def _picamera_still_capture(qbe, state, exp_us=None, gain=None):
+    """Open Picamera2 in still config, capture one frame, return numpy array.
+    exp_us/gain: lock AE from preview to avoid re-exposure on fresh camera open."""
+    size = (9248, 6944) if state.save_full else (4624, 3472)
+    cam = Picamera2(qbe.cam_idx)
+    try:
+        cfg = cam.create_still_configuration(
+            main={"size": size, "format": "RGB888"}, buffer_count=1)
+        cam.configure(cfg)
+        cam.start()
+        controls = {"AfMode": 0, "LensPosition": state.lp, "ExposureValue": state.ev}
+        if exp_us and gain:
+            controls["ExposureTime"] = int(exp_us)
+            controls["AnalogueGain"] = float(gain)
+        cam.set_controls(controls)
+        time.sleep(0.5)
+        frame = cam.capture_array()
+        return frame
+    finally:
+        try: cam.stop()
+        except Exception: pass
+        try: cam.close()
+        except Exception: pass
+
+
+def _picamera_dng_capture(qbe, state, out_path, exp_us=None, gain=None):
+    """Open Picamera2 with raw + main stream, save DNG file.
+    main stream is required by Picamera2 for DNG output alongside raw."""
+    size = (9248, 6944) if state.save_full else (4624, 3472)
+    cam = Picamera2(qbe.cam_idx)
+    try:
+        cfg = cam.create_still_configuration(
+            main={"size": size, "format": "RGB888"},
+            raw={"size": cam.sensor_resolution},
+            buffer_count=1)
+        cam.configure(cfg)
+        cam.start()
+        controls = {"AfMode": 0, "LensPosition": state.lp, "ExposureValue": state.ev}
+        if exp_us and gain:
+            controls["ExposureTime"] = int(exp_us)
+            controls["AnalogueGain"] = float(gain)
+        cam.set_controls(controls)
+        time.sleep(0.5)
+        cam.capture_file(out_path)
+    finally:
+        try: cam.stop()
+        except Exception: pass
+        try: cam.close()
+        except Exception: pass
+
+
+def _fname(base_ts, tag, ext, state, qbe):
+    return "%s_%s_lp%.2f_ev%.1f_cam%d.%s" % (
+        base_ts, tag, state.lp, state.ev, qbe.cam_idx, ext)
+
+
+# ── 6 save routes ──────────────────────────────────────────────────────────
+
+def save_r1(state, qbe, sbe, output_dir, base_ts=None, ae=""):
+    """z — rpicam-still → JPEG"""
+    t = base_ts or ts()
+    path = os.path.join(output_dir, _fname(t, "rpi_jpg", "jpg", state, qbe))
+    print("[R1] rpi JPEG -> %s" % path)
+    ret = _rpicam_run(qbe, state, state.save_mode_cmd(), path, ae)
+    print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
+
+
+def save_r2(state, qbe, sbe, output_dir, base_ts=None, ae=""):
+    """x — rpicam-still → PNG"""
+    t = base_ts or ts()
+    path = os.path.join(output_dir, _fname(t, "rpi_png", "png", state, qbe))
+    print("[R2] rpi PNG  -> %s" % path)
+    ret = _rpicam_run(qbe, state, state.save_mode_cmd(), path, ae, " --encoding png")
+    print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
+
+
+def save_r3(state, qbe, sbe, output_dir, base_ts=None, ae=""):
+    """c — rpicam-still → DNG + JPEG"""
+    t = base_ts or ts()
+    # rpicam-still saves .jpg + .dng with same base name
+    path = os.path.join(output_dir, _fname(t, "rpi_dng", "jpg", state, qbe))
+    print("[R3] rpi DNG  -> %s + .dng" % path)
+    ret = _rpicam_run(qbe, state, state.save_mode_cmd(), path, ae, " --raw")
+    print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
+
+
+def save_r4(state, qbe, sbe, output_dir, base_ts=None, frame=None, exp_us=None, gain=None):
+    """v — Picamera2 → JPEG"""
+    t = base_ts or ts()
+    path = os.path.join(output_dir, _fname(t, "pic_jpg", "jpg", state, qbe))
+    f = frame if frame is not None else _picamera_still_capture(qbe, state, exp_us, gain)
+    print("[R4] pic JPEG -> %s" % path)
+    cv2.imwrite(path, f, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    print("     OK")
+
+
+def save_r5(state, qbe, sbe, output_dir, base_ts=None, frame=None, exp_us=None, gain=None):
+    """b — Picamera2 → PNG"""
+    t = base_ts or ts()
+    path = os.path.join(output_dir, _fname(t, "pic_png", "png", state, qbe))
+    f = frame if frame is not None else _picamera_still_capture(qbe, state, exp_us, gain)
+    print("[R5] pic PNG  -> %s" % path)
+    cv2.imwrite(path, f)
+    print("     OK")
+
+
+def save_r6(state, qbe, sbe, output_dir, base_ts=None, exp_us=None, gain=None):
+    """n — Picamera2 → DNG"""
+    t = base_ts or ts()
+    path = os.path.join(output_dir, _fname(t, "pic_dng", "dng", state, qbe))
+    print("[R6] pic DNG  -> %s" % path)
+    _picamera_dng_capture(qbe, state, path, exp_us, gain)
+    print("     OK")
+
+
+def save_all(state, qbe, sbe, output_dir):
+    """m — all 6 routes with shared timestamp and minimal stop/start cycles"""
+    os.makedirs(output_dir, exist_ok=True)
+    exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
+    ae = _ae_flags(exp_us, gain)
+    t  = ts()
+    print("[ALL] Starting all 6 routes  ts=%s" % t)
+
+    _stop_for_save(state, qbe, sbe)
+
+    # R1 R2 R3 — rpicam-still (subprocesses, AE locked via --shutter --gain)
+    save_r1(state, qbe, sbe, output_dir, t, ae)
+    save_r2(state, qbe, sbe, output_dir, t, ae)
+    save_r3(state, qbe, sbe, output_dir, t, ae)
+
+    # R4 R5 — Picamera2 JPEG + PNG, share one still capture, AE locked
+    frame = _picamera_still_capture(qbe, state, exp_us, gain)
+    save_r4(state, qbe, sbe, output_dir, t, frame=frame)
+    save_r5(state, qbe, sbe, output_dir, t, frame=frame)
+
+    # R6 — Picamera2 DNG, AE locked
+    save_r6(state, qbe, sbe, output_dir, t, exp_us=exp_us, gain=gain)
+
+    _restore_after_save(state, qbe, sbe)
+    print("[ALL] Done.")
+
+
+# ── Burst / EV bracket (rpicam-still JPEG, moved to u/y) ───────────────────
 
 def save_burst(state, qbe, sbe, output_dir, count=5):
     os.makedirs(output_dir, exist_ok=True)
-    exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
+    ae = _ae_flags(*_read_ae(qbe)) if state.backend == "qtgl" else ""
     step    = 0.25
     half    = count // 2
     offsets = [round(-half * step + i * step, 2) for i in range(count)]
     lps     = [round(clamp(state.lp + d, LP_MIN, LP_MAX), 2) for d in offsets]
-    print("[BURST] %d shots, LP: %s  shutter=%s gain=%s" % (
-        count, lps,
-        ("%dus" % exp_us) if exp_us else "auto",
-        ("%.2f" % gain) if gain else "auto"))
+    print("[BURST] %d shots, LP: %s" % (count, lps))
     _stop_for_save(state, qbe, sbe)
     for lp in lps:
         fname = "%s_%s_lp%.2f_ev%.1f_cam%d.jpg" % (
@@ -370,14 +488,13 @@ def save_burst(state, qbe, sbe, output_dir, count=5):
         cmd = (
             "rpicam-still -n --immediate --camera %d --mode %s "
             "--autofocus-mode manual --lens-position %.2f --ev %.1f%s -o %s"
-            % (qbe.cam_idx, state.save_mode_cmd(), lp, state.ev,
-               _ae_flags(exp_us, gain), path)
+            % (qbe.cam_idx, state.save_mode_cmd(), lp, state.ev, ae, path)
         )
         ret = os.system(cmd)
         print("  LP=%.2f -> %s" % (lp, "OK" if ret == 0 else "Error"))
         time.sleep(0.3)
     _restore_after_save(state, qbe, sbe)
-    print("[BURST] Done. Output: %s" % output_dir)
+    print("[BURST] Done.")
 
 
 def ev_bracket(state, qbe, sbe, output_dir):
@@ -400,7 +517,7 @@ def ev_bracket(state, qbe, sbe, output_dir):
         print("  EV=%+.1f -> %s" % (ev, "OK" if ret == 0 else "Error"))
         time.sleep(0.3)
     _restore_after_save(state, qbe, sbe)
-    print("[EV-BRACKET] Done. Output: %s" % output_dir)
+    print("[EV-BRACKET] Done.")
 
 
 # ── Autofocus ──────────────────────────────────────────────────────────────
@@ -438,8 +555,7 @@ def autofocus_once(state, qbe, sbe):
         try:
             p = Picamera2(qbe.cam_idx)
             cfg = p.create_preview_configuration(main={"size": (1280, 720)})
-            p.configure(cfg)
-            p.start()
+            p.configure(cfg); p.start()
             time.sleep(1.0)
             lp, af_state = _do_af(p)
             if lp is not None:
@@ -488,12 +604,10 @@ def main():
             else:
                 sbe.tick(state)
                 frame = np.zeros((DISPLAY_H, DISPLAY_W, 3), dtype=np.uint8)
-                cv2.putText(
-                    frame,
-                    "rpicam-still preview active (see separate window)",
-                    (40, DISPLAY_H // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 200, 80), 2, cv2.LINE_AA,
-                )
+                cv2.putText(frame,
+                            "rpicam-still preview active (see separate window)",
+                            (40, DISPLAY_H // 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 200, 80), 2, cv2.LINE_AA)
 
             if frame is not None:
                 bar = make_status_bar(state, cam_idx, LP_MAX, qbe.capture_sz)
@@ -505,7 +619,6 @@ def main():
                 continue
             k = key & 0xFF
 
-            # Quit
             if k == ord('q'):
                 break
 
@@ -551,18 +664,18 @@ def main():
                 if state.backend == "qtgl": qbe.apply_controls(state)
                 else: sbe.mark_dirty()
 
-            # ── Zoom ───────────────────────────────────────────────────────
-            elif k in (ord('z'), ord('Z')):
+            # ── Zoom: a=out, d=in ──────────────────────────────────────────
+            elif k in (ord('a'), ord('A')):
                 state.zoom = clamp(state.zoom - 1, ZOOM_MIN, ZOOM_MAX)
                 if state.backend == "qtgl": qbe.apply_zoom(state)
                 else: sbe.mark_dirty()
 
-            elif k in (ord('x'), ord('X')):
+            elif k in (ord('d'), ord('D')):
                 state.zoom = clamp(state.zoom + 1, ZOOM_MIN, ZOOM_MAX)
                 if state.backend == "qtgl": qbe.apply_zoom(state)
                 else: sbe.mark_dirty()
 
-            # ── Pan: ijkl + arrow keys ─────────────────────────────────────
+            # ── Pan: ijkl ─────────────────────────────────────────────────
             elif k == ord('i'):
                 _ps = 0.1 / max(state.zoom, 1)
                 state.zoom_cy = clamp(state.zoom_cy - _ps, 0.05, 0.95)
@@ -605,21 +718,22 @@ def main():
                 if state.backend == "qtgl": qbe.apply_zoom(state)
                 else: sbe.mark_dirty()
 
-            # ── Toggle backend ─────────────────────────────────────────────
+            # ── Preview capture resolution (p) ─────────────────────────────
             elif k in (ord('p'), ord('P')):
                 if state.backend == "qtgl":
                     new_sz = (9248, 6944) if qbe.capture_sz == (4624, 3472) else (4624, 3472)
-                    print("[CAP] Switching preview capture to %dx%d (may be slow)..." % new_sz)
+                    print("[CAP] Switching preview capture to %dx%d ..." % new_sz)
                     qbe.switch_capture_sz(new_sz, state)
                     print("[CAP] Done.")
 
-            elif k in (ord('v'), ord('V')):
+            # ── Backend toggle (h) ─────────────────────────────────────────
+            elif k in (ord('h'), ord('H')):
                 if state.backend == "qtgl":
                     print("[MODE] Switching to rpicam-still preview...")
                     qbe.stop()
                     state.backend = "still"
                     sbe.start(state)
-                    print("[MODE] rpicam-still active. LP/focus shown in its window title.")
+                    print("[MODE] rpicam-still active.")
                 else:
                     print("[MODE] Switching to Picamera2 preview...")
                     sbe.stop()
@@ -628,27 +742,74 @@ def main():
                     qbe.start(state)
                     print("[MODE] Picamera2 active.")
 
-            # ── Toggle save resolution ─────────────────────────────────────
-            elif k in (ord('m'), ord('M')):
+            # ── Save resolution toggle (g) ─────────────────────────────────
+            elif k in (ord('g'), ord('G')):
                 state.save_full = not state.save_full
                 print("[RES] Save: %s" % (
                     "9248x6944 FULL" if state.save_full else "4624x3472 HALF"))
 
-            # ── Autofocus ──────────────────────────────────────────────────
+            # ── Autofocus (t) ──────────────────────────────────────────────
             elif k in (ord('t'), ord('T')):
                 autofocus_once(state, qbe, sbe)
 
-            # ── Capture ────────────────────────────────────────────────────
-            elif k in (ord('s'), ord('S')):
-                save_single(state, qbe, sbe, output_dir)
+            # ── 6 save routes (z x c v b n) ───────────────────────────────
+            elif k in (ord('z'), ord('Z')):
+                os.makedirs(output_dir, exist_ok=True)
+                ae = _ae_flags(*_read_ae(qbe)) if state.backend == "qtgl" else ""
+                _stop_for_save(state, qbe, sbe)
+                save_r1(state, qbe, sbe, output_dir, ae=ae)
+                _restore_after_save(state, qbe, sbe)
+
+            elif k in (ord('x'), ord('X')):
+                os.makedirs(output_dir, exist_ok=True)
+                ae = _ae_flags(*_read_ae(qbe)) if state.backend == "qtgl" else ""
+                _stop_for_save(state, qbe, sbe)
+                save_r2(state, qbe, sbe, output_dir, ae=ae)
+                _restore_after_save(state, qbe, sbe)
+
+            elif k in (ord('c'), ord('C')):
+                os.makedirs(output_dir, exist_ok=True)
+                ae = _ae_flags(*_read_ae(qbe)) if state.backend == "qtgl" else ""
+                _stop_for_save(state, qbe, sbe)
+                save_r3(state, qbe, sbe, output_dir, ae=ae)
+                _restore_after_save(state, qbe, sbe)
+
+            elif k in (ord('v'), ord('V')):
+                os.makedirs(output_dir, exist_ok=True)
+                exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
+                _stop_for_save(state, qbe, sbe)
+                frame = _picamera_still_capture(qbe, state, exp_us, gain)
+                save_r4(state, qbe, sbe, output_dir, frame=frame)
+                _restore_after_save(state, qbe, sbe)
 
             elif k in (ord('b'), ord('B')):
-                save_burst(state, qbe, sbe, output_dir)
+                os.makedirs(output_dir, exist_ok=True)
+                exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
+                _stop_for_save(state, qbe, sbe)
+                frame = _picamera_still_capture(qbe, state, exp_us, gain)
+                save_r5(state, qbe, sbe, output_dir, frame=frame)
+                _restore_after_save(state, qbe, sbe)
 
             elif k in (ord('n'), ord('N')):
+                os.makedirs(output_dir, exist_ok=True)
+                exp_us, gain = _read_ae(qbe) if state.backend == "qtgl" else (None, None)
+                _stop_for_save(state, qbe, sbe)
+                save_r6(state, qbe, sbe, output_dir, exp_us=exp_us, gain=gain)
+                _restore_after_save(state, qbe, sbe)
+
+            # ── All routes (m) ─────────────────────────────────────────────
+            elif k in (ord('m'), ord('M')):
+                save_all(state, qbe, sbe, output_dir)
+
+            # ── Burst LP sweep (u) ─────────────────────────────────────────
+            elif k in (ord('u'), ord('U')):
+                save_burst(state, qbe, sbe, output_dir)
+
+            # ── EV bracket (y) ─────────────────────────────────────────────
+            elif k in (ord('y'), ord('Y')):
                 ev_bracket(state, qbe, sbe, output_dir)
 
-            # ── Info ───────────────────────────────────────────────────────
+            # ── Info (f) ───────────────────────────────────────────────────
             elif k in (ord('f'), ord('F')):
                 roi = state.roi()
                 print("[INFO] cam%d  backend=%s  LP=%.2f  EV=%+.1f  "
