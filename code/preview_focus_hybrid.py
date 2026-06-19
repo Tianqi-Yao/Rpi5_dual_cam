@@ -270,15 +270,13 @@ def make_status_bar(state, cam_idx, lp_max, capture_sz=(4624, 3472)):
            capture_sz[0], capture_sz[1], DISPLAY_W, DISPLAY_H,
            state.zoom_cx, state.zoom_cy)
     )
-    line2a = ("=/- ] [ . , : LP    e/w : EV    a/d : zoom    i/k/j/l : pan    r : reset    "
-              "p : cap res    g : save res    h : backend    t : AF    f : info    q : quit")
-    line2b = ("SAVE: z=rpi JPEG  x=rpi PNG  c=rpi DNG  v=pic JPEG  b=pic PNG  n=pic DNG  "
-              "m=ALL    u : burst    y : EV bracket")
+    line2a = "=/- ][., :LP  e/w:EV  a/d:zoom  ijkl:pan  r:reset  p:cap  g:save  h:bknd  t:AF  f:info  q:quit"
+    line2b = "z=rpi-jpg  x=rpi-png  c=rpi-dng  v=pic-jpg  b=pic-png  n=pic-dng  m=ALL  u=burst  y=ev-brk"
 
-    cv2.putText(bar, line1a, (8, dy),     cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 0),     fw, cv2.LINE_AA)
-    cv2.putText(bar, line1b, (8, dy * 2), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 220, 0),     fw, cv2.LINE_AA)
-    cv2.putText(bar, line2a, (8, dy * 3), cv2.FONT_HERSHEY_SIMPLEX, fs, (160, 160, 160), fw, cv2.LINE_AA)
-    cv2.putText(bar, line2b, (8, dy * 4), cv2.FONT_HERSHEY_SIMPLEX, fs, (100, 200, 255), fw, cv2.LINE_AA)
+    cv2.putText(bar, line1a, (8, dy),     cv2.FONT_HERSHEY_SIMPLEX, fs,   (0, 255, 0),     fw, cv2.LINE_AA)
+    cv2.putText(bar, line1b, (8, dy * 2), cv2.FONT_HERSHEY_SIMPLEX, fs,   (0, 220, 0),     fw, cv2.LINE_AA)
+    cv2.putText(bar, line2a, (8, dy * 3), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (160, 160, 160), fw, cv2.LINE_AA)
+    cv2.putText(bar, line2b, (8, dy * 4), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (100, 200, 255), fw, cv2.LINE_AA)
     return bar
 
 
@@ -308,7 +306,6 @@ def _rpicam_run(qbe, state, mode_str, out_path, extra=""):
         % (qbe.cam_idx, mode_str, state.lp, state.ev, extra, out_path)
     )
     return os.system(cmd)
-
 
 
 def _picamera_dng_capture(qbe, state, out_path):
@@ -430,7 +427,7 @@ def save_all(state, qbe, sbe, output_dir):
 
 # ── Burst / EV bracket (Picamera2 PNG) ────────────────────────────────────
 
-def save_burst(state, qbe, sbe, output_dir, count=5):
+def save_burst(state, qbe, output_dir, count=5):
     """Picamera2 LP sweep using running preview camera (no restart — lens stays settled)."""
     os.makedirs(output_dir, exist_ok=True)
     if qbe.cam is None:
@@ -777,7 +774,7 @@ def main():
 
             # ── Burst LP sweep (u) ─────────────────────────────────────────
             elif k in (ord('u'), ord('U')):
-                save_burst(state, qbe, sbe, output_dir)
+                save_burst(state, qbe, output_dir)
 
             # ── EV bracket (y) ─────────────────────────────────────────────
             elif k in (ord('y'), ord('Y')):
