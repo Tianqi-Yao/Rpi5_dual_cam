@@ -51,8 +51,6 @@ SENSOR_H = 6944
 DEBOUNCE_S    = 0.25
 RESTART_DELAY = 0.15
 
-PICAM_SETTLE_S   = 5.0    # Picamera2 still AE 收敛等待时间（秒），与 rpicam-still 默认 5s 一致
-
 FULL_MODE = "9248:6944:12:P"
 HALF_MODE = "4624:3472:12:P"
 
@@ -302,7 +300,8 @@ def _restore_after_save(state, qbe, sbe):
 
 
 def _rpicam_run(qbe, state, mode_str, out_path, extra=""):
-    """Run rpicam-still. No -t → uses default 5000ms for AE convergence before capture."""
+    """Run rpicam-still. No -t → uses default 5000ms for AE convergence before capture.
+    rpicam-still streams internally so AE converges properly; no preview AE needed."""
     cmd = (
         'rpicam-still -n --camera %d --mode %s '
         '--autofocus-mode manual --lens-position %.2f --ev %.1f%s -o "%s"'
@@ -311,39 +310,21 @@ def _rpicam_run(qbe, state, mode_str, out_path, extra=""):
     return os.system(cmd)
 
 
-def _picamera_still_capture(qbe, state):
-    """Open Picamera2 in still config, capture one frame with own AE convergence."""
-    size = (9248, 6944) if state.save_full else (4624, 3472)
-    cam = Picamera2(qbe.cam_idx)
-    try:
-        cfg = cam.create_still_configuration(
-            main={"size": size, "format": "RGB888"}, buffer_count=1)
-        cam.configure(cfg)
-        cam.start()
-        cam.set_controls({"AfMode": 0, "LensPosition": state.lp, "ExposureValue": state.ev})
-        time.sleep(PICAM_SETTLE_S)
-        frame = cam.capture_array()
-        return frame
-    finally:
-        try: cam.stop()
-        except Exception: pass
-        try: cam.close()
-        except Exception: pass
-
 
 def _picamera_dng_capture(qbe, state, out_path):
-    """Open Picamera2 with raw + main stream, save DNG via request.save_dng()."""
+    """Open Picamera2 with preview config + raw stream, save DNG via request.save_dng().
+    AE not locked — converges at capture resolution."""
     size = (9248, 6944) if state.save_full else (4624, 3472)
     cam = Picamera2(qbe.cam_idx)
     try:
-        cfg = cam.create_still_configuration(
+        cfg = cam.create_preview_configuration(
             main={"size": size, "format": "RGB888"},
             raw={"size": cam.sensor_resolution},
-            buffer_count=1)
+            buffer_count=2)
         cam.configure(cfg)
         cam.start()
         cam.set_controls({"AfMode": 0, "LensPosition": state.lp, "ExposureValue": state.ev})
-        time.sleep(PICAM_SETTLE_S)
+        time.sleep(5.0)   # lens settle + AE convergence at capture resolution
         request = cam.capture_request()
         try:
             request.save_dng(out_path)
@@ -390,23 +371,27 @@ def save_r3(state, qbe, output_dir, base_ts=None):
     print("     %s" % ("OK" if ret == 0 else "Error %d" % ret))
 
 
-def save_r4(state, qbe, output_dir, base_ts=None, frame=None):
-    """v — Picamera2 → JPEG"""
+def save_r4(state, qbe, output_dir, base_ts=None):
+    """v — Picamera2 → JPEG. Captures directly from running preview (no camera restart)."""
+    if qbe.cam is None:
+        print("[R4] Skip: preview not running"); return
     t = base_ts or ts()
     path = os.path.join(output_dir, _fname(t, "v_r4_picam_jpg", "jpg", state, qbe))
-    f = frame if frame is not None else _picamera_still_capture(qbe, state)
+    frame = qbe.cam.capture_array()
     print("[R4] pic JPEG -> %s" % path)
-    cv2.imwrite(path, f, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
     print("     OK")
 
 
-def save_r5(state, qbe, output_dir, base_ts=None, frame=None):
-    """b — Picamera2 → PNG"""
+def save_r5(state, qbe, output_dir, base_ts=None):
+    """b — Picamera2 → PNG. Captures directly from running preview (no camera restart)."""
+    if qbe.cam is None:
+        print("[R5] Skip: preview not running"); return
     t = base_ts or ts()
     path = os.path.join(output_dir, _fname(t, "b_r5_picam_png", "png", state, qbe))
-    f = frame if frame is not None else _picamera_still_capture(qbe, state)
+    frame = qbe.cam.capture_array()
     print("[R5] pic PNG  -> %s" % path)
-    cv2.imwrite(path, f)
+    cv2.imwrite(path, frame)
     print("     OK")
 
 
@@ -420,19 +405,23 @@ def save_r6(state, qbe, output_dir, base_ts=None):
 
 
 def save_all(state, qbe, sbe, output_dir):
-    """m — all 6 routes, each with own AE convergence"""
+    """m — all 6 routes.
+    R4/R5: captured from running preview first (no restart = sharp, correct AE).
+    R1/R2/R3/R6: preview stopped, then rpicam-still / DNG camera opened."""
     os.makedirs(output_dir, exist_ok=True)
     t = ts()
     print("[ALL] Starting all 6 routes  ts=%s" % t)
 
+    # R4/R5 first — preview is still running, no restart needed
+    save_r4(state, qbe, output_dir, t)
+    save_r5(state, qbe, output_dir, t)
+
+    # R1/R2/R3/R6 — require stopping preview
     _stop_for_save(state, qbe, sbe)
     try:
         save_r1(state, qbe, output_dir, t)
         save_r2(state, qbe, output_dir, t)
         save_r3(state, qbe, output_dir, t)
-        frame = _picamera_still_capture(qbe, state)
-        save_r4(state, qbe, output_dir, t, frame=frame)
-        save_r5(state, qbe, output_dir, t, frame=frame)
         save_r6(state, qbe, output_dir, t)
     finally:
         _restore_after_save(state, qbe, sbe)
@@ -442,50 +431,31 @@ def save_all(state, qbe, sbe, output_dir):
 # ── Burst / EV bracket (Picamera2 PNG) ────────────────────────────────────
 
 def save_burst(state, qbe, sbe, output_dir, count=5):
-    """Picamera2 LP sweep: AE converges once, then LP changes per shot (fast)."""
+    """Picamera2 LP sweep using running preview camera (no restart — lens stays settled)."""
     os.makedirs(output_dir, exist_ok=True)
+    if qbe.cam is None:
+        print("[BURST] Skip: preview not running"); return
     step    = 0.25
     half    = count // 2
     offsets = [round(-half * step + i * step, 2) for i in range(count)]
     lps     = [round(clamp(state.lp + d, LP_MIN, LP_MAX), 2) for d in offsets]
     print("[BURST] %d shots (Picamera2 PNG), LP: %s" % (count, lps))
-
-    _stop_for_save(state, qbe, sbe)
-    try:
-        size = (9248, 6944) if state.save_full else (4624, 3472)
-        cam = Picamera2(qbe.cam_idx)
-        try:
-            cfg = cam.create_still_configuration(
-                main={"size": size, "format": "RGB888"}, buffer_count=1)
-            cam.configure(cfg)
-            cam.start()
-            cam.set_controls({
-                "AfMode": 0,
-                "LensPosition": state.lp,
-                "ExposureValue": state.ev,
-            })
-            time.sleep(PICAM_SETTLE_S)   # AE 收敛一次
-            base_ts = ts()
-            for lp in lps:
-                cam.set_controls({"LensPosition": lp})
-                time.sleep(0.3)          # 等镜头到位
-                frame = cam.capture_array()
-                fname = "%s_burst_lp%.2f_ev%.1f_cam%d.png" % (
-                    base_ts, lp, state.ev, qbe.cam_idx)
-                cv2.imwrite(os.path.join(output_dir, fname), frame)
-                print("  LP=%.2f -> OK" % lp)
-        finally:
-            try: cam.stop()
-            except Exception: pass
-            try: cam.close()
-            except Exception: pass
-    finally:
-        _restore_after_save(state, qbe, sbe)
+    base_ts = ts()
+    for lp in lps:
+        qbe.cam.set_controls({"LensPosition": lp})
+        time.sleep(0.3)
+        frame = qbe.cam.capture_array()
+        fname = "%s_burst_lp%.2f_ev%.1f_cam%d.png" % (base_ts, lp, state.ev, qbe.cam_idx)
+        cv2.imwrite(os.path.join(output_dir, fname), frame)
+        print("  LP=%.2f -> OK" % lp)
+    # 恢复原始 LP
+    qbe.cam.set_controls({"LensPosition": state.lp})
     print("[BURST] Done.")
 
 
 def ev_bracket(state, qbe, sbe, output_dir):
-    """Picamera2 EV bracket: AE converges once, then ExposureValue shifts per shot."""
+    """Picamera2 EV bracket: AE must NOT be locked — ExposureValue only works in auto AE mode.
+    Uses preview configuration (streaming) so AE can converge at each EV level."""
     os.makedirs(output_dir, exist_ok=True)
     offsets = [-1.0, -0.5, 0.0, 0.5, 1.0]
     evs     = [round(clamp(state.ev + d, EV_MIN, EV_MAX), 1) for d in offsets]
@@ -496,21 +466,23 @@ def ev_bracket(state, qbe, sbe, output_dir):
         size = (9248, 6944) if state.save_full else (4624, 3472)
         cam = Picamera2(qbe.cam_idx)
         try:
-            cfg = cam.create_still_configuration(
-                main={"size": size, "format": "RGB888"}, buffer_count=1)
+            # Use preview configuration (buffer_count=2) so AE streams continuously
+            # and can properly converge when ExposureValue changes.
+            cfg = cam.create_preview_configuration(
+                main={"size": size, "format": "RGB888"}, buffer_count=2)
             cam.configure(cfg)
             cam.start()
-            cam.set_controls({
-                "AfMode": 0,
-                "LensPosition": state.lp,
-                "ExposureValue": evs[0],
-            })
-            time.sleep(PICAM_SETTLE_S)   # 初始 AE 收敛（已在 evs[0] 上）
+            cam.set_controls({"AfMode": 0, "LensPosition": state.lp,
+                              "ExposureValue": evs[0]})
+            # Full res (~1-2fps) needs more time than half res (~7fps)
+            cold_s = 8.0 if state.save_full else 5.0
+            warm_s = 4.0 if state.save_full else 1.5
+            time.sleep(cold_s)   # cold-start AE convergence at evs[0]
             base_ts = ts()
             for i, ev in enumerate(evs):
-                if i > 0:   # 第一张直接拍（已收敛），后续换 EV 后再等
+                if i > 0:
                     cam.set_controls({"ExposureValue": ev})
-                    time.sleep(1.5)
+                    time.sleep(warm_s)   # AE re-settles to new EV target (warm adjustment)
                 frame = cam.capture_array()
                 fname = "%s_bracket_lp%.2f_ev%.1f_brk%d_cam%d.png" % (
                     base_ts, state.lp, ev, i, qbe.cam_idx)
@@ -785,21 +757,11 @@ def main():
 
             elif k in (ord('v'), ord('V')):
                 os.makedirs(output_dir, exist_ok=True)
-                _stop_for_save(state, qbe, sbe)
-                try:
-                    frame = _picamera_still_capture(qbe, state)
-                    save_r4(state, qbe, output_dir, frame=frame)
-                finally:
-                    _restore_after_save(state, qbe, sbe)
+                save_r4(state, qbe, output_dir)   # captures from running preview, no restart
 
             elif k in (ord('b'), ord('B')):
                 os.makedirs(output_dir, exist_ok=True)
-                _stop_for_save(state, qbe, sbe)
-                try:
-                    frame = _picamera_still_capture(qbe, state)
-                    save_r5(state, qbe, output_dir, frame=frame)
-                finally:
-                    _restore_after_save(state, qbe, sbe)
+                save_r5(state, qbe, output_dir)   # captures from running preview, no restart
 
             elif k in (ord('n'), ord('N')):
                 os.makedirs(output_dir, exist_ok=True)
