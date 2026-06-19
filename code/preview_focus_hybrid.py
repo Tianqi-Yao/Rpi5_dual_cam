@@ -445,51 +445,84 @@ def save_all(state, qbe, sbe, output_dir):
 # ── Burst / EV bracket (rpicam-still JPEG, moved to u/y) ───────────────────
 
 def save_burst(state, qbe, sbe, output_dir, count=5):
+    """Picamera2 LP sweep: AE converges once, then LP changes per shot (fast)."""
     os.makedirs(output_dir, exist_ok=True)
     step    = 0.25
     half    = count // 2
     offsets = [round(-half * step + i * step, 2) for i in range(count)]
     lps     = [round(clamp(state.lp + d, LP_MIN, LP_MAX), 2) for d in offsets]
-    print("[BURST] %d shots, LP: %s" % (count, lps))
+    print("[BURST] %d shots (Picamera2 PNG), LP: %s" % (count, lps))
+
     _stop_for_save(state, qbe, sbe)
     try:
-        for lp in lps:
-            fname = "%s_%s_lp%.2f_ev%.1f_cam%d.jpg" % (
-                ts(), state.save_res_tag(), lp, state.ev, qbe.cam_idx)
-            path = os.path.join(output_dir, fname)
-            cmd = (
-                'rpicam-still -n --camera %d --mode %s '
-                '--autofocus-mode manual --lens-position %.2f --ev %.1f -o "%s"'
-                % (qbe.cam_idx, state.save_mode_cmd(), lp, state.ev, path)
-            )
-            ret = os.system(cmd)
-            print("  LP=%.2f -> %s" % (lp, "OK" if ret == 0 else "Error"))
-            time.sleep(0.3)
+        size = (9248, 6944) if state.save_full else (4624, 3472)
+        cam = Picamera2(qbe.cam_idx)
+        try:
+            cfg = cam.create_still_configuration(
+                main={"size": size, "format": "RGB888"}, buffer_count=1)
+            cam.configure(cfg)
+            cam.start()
+            cam.set_controls({
+                "AfMode": 0,
+                "LensPosition": state.lp,
+                "ExposureValue": state.ev,
+            })
+            time.sleep(PICAM_SETTLE_S)   # AE 收敛一次
+            base_ts = ts()
+            for lp in lps:
+                cam.set_controls({"LensPosition": lp})
+                time.sleep(0.3)          # 等镜头到位
+                frame = cam.capture_array()
+                fname = "%s_burst_lp%.2f_ev%.1f_cam%d.png" % (
+                    base_ts, lp, state.ev, qbe.cam_idx)
+                cv2.imwrite(os.path.join(output_dir, fname), frame)
+                print("  LP=%.2f -> OK" % lp)
+        finally:
+            try: cam.stop()
+            except Exception: pass
+            try: cam.close()
+            except Exception: pass
     finally:
         _restore_after_save(state, qbe, sbe)
     print("[BURST] Done.")
 
 
 def ev_bracket(state, qbe, sbe, output_dir):
+    """Picamera2 EV bracket: AE converges once, then ExposureValue shifts per shot."""
     os.makedirs(output_dir, exist_ok=True)
     offsets = [-1.0, -0.5, 0.0, 0.5, 1.0]
     evs     = [round(clamp(state.ev + d, EV_MIN, EV_MAX), 1) for d in offsets]
-    base_ts = ts()
-    print("[EV-BRACKET] LP=%.2f, EV values: %s" % (state.lp, evs))
+    print("[EV-BRACKET] LP=%.2f, EV: %s  (Picamera2 PNG)" % (state.lp, evs))
+
     _stop_for_save(state, qbe, sbe)
     try:
-        for i, ev in enumerate(evs):
-            fname = "%s_%s_lp%.2f_ev%.1f_brk%d_cam%d.jpg" % (
-                base_ts, state.save_res_tag(), state.lp, ev, i, qbe.cam_idx)
-            path = os.path.join(output_dir, fname)
-            cmd = (
-                'rpicam-still -n --immediate --camera %d --mode %s '
-                '--autofocus-mode manual --lens-position %.2f --ev %.1f -o "%s"'
-                % (qbe.cam_idx, state.save_mode_cmd(), state.lp, ev, path)
-            )
-            ret = os.system(cmd)
-            print("  EV=%+.1f -> %s" % (ev, "OK" if ret == 0 else "Error"))
-            time.sleep(0.3)
+        size = (9248, 6944) if state.save_full else (4624, 3472)
+        cam = Picamera2(qbe.cam_idx)
+        try:
+            cfg = cam.create_still_configuration(
+                main={"size": size, "format": "RGB888"}, buffer_count=1)
+            cam.configure(cfg)
+            cam.start()
+            cam.set_controls({
+                "AfMode": 0,
+                "LensPosition": state.lp,
+                "ExposureValue": evs[0],
+            })
+            time.sleep(PICAM_SETTLE_S)   # 初始 AE 收敛
+            base_ts = ts()
+            for i, ev in enumerate(evs):
+                cam.set_controls({"ExposureValue": ev})
+                time.sleep(1.5)          # 等 AE 调整到新 EV 目标
+                frame = cam.capture_array()
+                fname = "%s_bracket_lp%.2f_ev%.1f_brk%d_cam%d.png" % (
+                    base_ts, state.lp, ev, i, qbe.cam_idx)
+                cv2.imwrite(os.path.join(output_dir, fname), frame)
+                print("  EV=%+.1f -> OK" % ev)
+        finally:
+            try: cam.stop()
+            except Exception: pass
+            try: cam.close()
+            except Exception: pass
     finally:
         _restore_after_save(state, qbe, sbe)
     print("[EV-BRACKET] Done.")
